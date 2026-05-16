@@ -1,0 +1,65 @@
+# Xuanzhi — runtime dependencies
+# Install with:  pip install -r requirements.txt
+# Then bootstrap Playwright browsers with:  playwright install chromium
+ 
+# ---- core
+# numpy is pinned <2.0 deliberately: every ML wheel below supports the
+# 1.26 line, whereas mixing NumPy 2.x with slightly-older torch builds
+# causes "module compiled using NumPy 1.x cannot be run" crashes.
+numpy>=1.26,<2.0
+pydantic>=2.6,<3.0
+httpx>=0.27
+python-dotenv>=1.0
+
+# ---- web scraping (course-required: Playwright replaces Selenium)
+playwright>=1.44,<2.0
+
+# ---- NLP (course-required: HuggingFace transformers)
+# These are version-locked as a SET — they must be mutually compatible.
+#
+# torch is pinned to 2.2.x because PyTorch dropped Intel-Mac (x86_64)
+# wheels starting with 2.3 — 2.2.2 is the last version that installs on
+# Intel Macs. This pin also works fine on Apple Silicon and Linux (you
+# just leave some MPS/CUDA performance on the table). Don't bump torch
+# above 2.2 without team-wide testing of every member's machine.
+#
+# transformers is pinned to <4.44 because 4.44+ hard-requires torch>=2.4.
+# numpy<2.0 (above) is required because torch 2.2.x was compiled
+# against numpy 1.x.
+torch>=2.2,<2.3
+transformers>=4.40,<4.44
+sentence-transformers>=3.0,<4.0
+scikit-learn>=1.4,<2.0
+ 
+# ---- optional: density-based clustering
+# KMeans (scikit-learn, above) is the default clusterer and needs nothing
+# extra. hdbscan is only used by `run_embed_papers.py --cluster hdbscan`.
+# If it fails to build, just skip it — the project works without it.
+hdbscan>=0.8
+ 
+# NOTE: umap-learn was intentionally removed. It pulls in numba -> llvmlite,
+# which often fails to build on macOS, and nothing in the codebase imports
+# it. If you later want a 2-D embedding-space plot for the slides, prefer
+# scikit-learn's TSNE (already installed) over reinstating umap-learn.
+ 
+# ---- frontier-model comparison
+openai>=1.40,<2.0
+ 
+# ---- computer vision (course-required: torchvision + HF)
+# torchvision MUST match torch (0.17 <-> torch 2.2). Keep this bound in
+# sync with the torch pin above whenever the torch version changes.
+torchvision>=0.17,<0.18
+pillow>=10.0
+pdfplumber>=0.11   # figure / text extraction
+PyMuPDF>=1.24      # figure bbox + image rendering
+ 
+# ---- UI (course-required: Streamlit)
+streamlit>=1.34
+streamlit-agraph>=0.0.45
+pyvis>=0.3.2
+networkx>=3.2
+ 
+# ---- dev / notebooks
+jupyter>=1.0
+matplotlib>=3.8
+pandas>=2.2

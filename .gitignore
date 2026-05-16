@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Xuanzhi project-specific -----------------------------------------------
+
+# Local SQLite database
+data/xuanzhi.db
+data/xuanzhi.db-wal
+data/xuanzhi.db-shm
+
+# Downloaded artefacts (PDFs, extracted figures, embeddings, etc.)
+data/outputs/
+data/pdfs/
+data/figures/
+*.faiss
+
+# Playwright local cache
+.playwright/
+
+# Keep sample fixtures
+!data/samples/.gitkeep
+
