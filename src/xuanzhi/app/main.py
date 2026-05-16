@@ -52,9 +52,10 @@ st.sidebar.caption("Academic-research cognition layer")
 db_path = st.sidebar.text_input("Database path", value=str(DEFAULT_DB_PATH))
 
 VIEWS = [
+    "Knowledge Graph",
+    "Collection",
     "Overview",
     "Ingest",
-    "Knowledge Graph",
     "Paper Explorer",
     "Cross-Literature",
     "Figure Source Lookup",
@@ -170,7 +171,7 @@ def view_ingest() -> None:
 
 def view_graph() -> None:
     st.title("Knowledge Graph")
-    st.caption("How the papers in the corpus connect to each other.")
+    st.caption("Explore your corpus — click a node to open its paper.")
 
     if overview["papers"] < 2:
         ui.empty_state(
@@ -219,13 +220,22 @@ def view_graph() -> None:
             "or run `run_embed_papers.py --cluster kmeans` so papers share concepts."
         )
 
-    clicked = ui.render_graph(graph, height=620)
-    if clicked:
-        paper = store.get_paper(clicked)
+    # Collect authors + abstract for the in-graph click card.
+    paper_extras: dict[str, dict] = {}
+    for nid in graph.nodes():
+        p = store.get_paper(nid)
+        if p:
+            paper_extras[nid] = {
+                "authors": ", ".join(a.name for a in p.authors[:5]),
+                "abstract": (p.abstract or "")[:360],
+            }
+
+    selected_id = ui.render_graph(graph, height=580, paper_extras=paper_extras)
+    if selected_id:
+        paper = store.get_paper(selected_id)
         if paper:
             st.divider()
-            st.subheader("Selected paper")
-            ui.paper_card(paper, expanded=True)
+            ui.paper_detail_panel(store, paper)
 
 
 # ========================================================= Paper Explorer
@@ -452,12 +462,46 @@ def view_figure_lookup() -> None:
                         st.markdown(f"[Source paper]({m.paper.url})")
 
 
+# ============================================================== Collection
+
+
+def view_collection() -> None:
+    st.title("Collection")
+    st.caption("Papers you have saved while browsing the graph.")
+
+    collection: list = st.session_state.setdefault("collection", [])
+
+    if not collection:
+        st.info("Nothing saved yet. Click a node in the Knowledge Graph and hit ☆ Save.")
+        return
+
+    st.caption(f"{len(collection)} saved paper{'s' if len(collection) != 1 else ''}")
+    if st.button("Clear all"):
+        st.session_state["collection"] = []
+        st.rerun()
+
+    st.divider()
+    for pid in list(collection):
+        paper = store.get_paper(pid)
+        if paper is None:
+            continue
+        with st.container(border=True):
+            col_card, col_rm = st.columns([9, 1])
+            with col_card:
+                ui.paper_card(paper, expanded=False)
+            with col_rm:
+                if st.button("✕", key=f"rm_{pid}"):
+                    collection.remove(pid)
+                    st.rerun()
+
+
 # ================================================================= router
 
 _ROUTER = {
+    "Knowledge Graph": view_graph,
+    "Collection": view_collection,
     "Overview": view_overview,
     "Ingest": view_ingest,
-    "Knowledge Graph": view_graph,
     "Paper Explorer": view_explorer,
     "Cross-Literature": view_cross,
     "Figure Source Lookup": view_figure_lookup,

@@ -106,68 +106,176 @@ def figure_grid(store: Store, paper: Paper, *, columns: int = 3) -> None:
                     st.caption(fig.caption[:160])
 
 
-def render_graph(graph, *, height: int = 600) -> str | None:
-    """Render a networkx graph with streamlit-agraph.
+def render_graph(
+    graph,
+    *,
+    height: int = 600,
+    paper_extras: dict | None = None,
+) -> str | None:
+    """Interactive graph: zoom, pan, drag nodes, click for a floating card.
 
-    Returns the id of a clicked node (or ``None``). Falls back to a plain
-    edge table if streamlit-agraph is not installed, so the view never
-    hard-crashes.
+    Clicking a node opens an in-graph info card (title, authors, abstract,
+    link).  A ▶ Animate / ⏸ Freeze button lets the user toggle the physics
+    simulation on demand.  Returns the paper id picked in the selectbox
+    below the graph (to open the full Streamlit detail panel), or ``None``.
     """
-    try:
-        from streamlit_agraph import Config, Edge, Node, agraph
-    except ImportError:
-        st.warning(
-            "`streamlit-agraph` is not installed — showing an edge table "
-            "instead. `pip install streamlit-agraph` for the interactive graph."
-        )
-        st.dataframe(
-            [
-                {
-                    "source": graph.nodes[a].get("title", a)[:50],
-                    "target": graph.nodes[b].get("title", b)[:50],
-                    "type": d.get("edge_type"),
-                    "weight": d.get("weight"),
-                }
-                for a, b, d in graph.edges(data=True)
-            ],
-            use_container_width=True,
-        )
+    import json
+    import networkx as nx
+    from pyvis.network import Network
+
+    if graph.number_of_nodes() == 0:
+        st.info("No nodes to display.")
         return None
 
-    nodes = []
-    for node_id, data in graph.nodes(data=True):
+    extras = paper_extras or {}
+
+    # Build JSON payload for the in-graph click card.
+    node_data: dict[str, dict] = {}
+    for nid, data in graph.nodes(data=True):
+        title = data.get("title", nid) or nid
+        ex = extras.get(nid, {})
+        node_data[nid] = {
+            "title":    title,
+            "authors":  ex.get("authors", ""),
+            "abstract": ex.get("abstract", ""),
+            "year":     str(data.get("year") or ""),
+            "source":   data.get("source", ""),
+            "citations": data.get("citation_count") or 0,
+            "areas":    data.get("areas") or [],
+            "url":      data.get("url") or "",
+        }
+
+    # Pre-compute spring layout so nodes are stable from the start.
+    scale = 800
+    pos = nx.spring_layout(
+        graph, seed=42,
+        k=2.5 / max(graph.number_of_nodes() ** 0.5, 1),
+    )
+
+    net = Network(height=f"{height}px", width="100%",
+                  bgcolor="#0e1117", font_color="#ffffff")
+    net.toggle_physics(False)
+
+    for nid, data in graph.nodes(data=True):
         source = data.get("source", "manual")
-        # Size hubs by degree so the layout reads at a glance.
-        degree = graph.degree(node_id)
-        nodes.append(
-            Node(
-                id=node_id,
-                label=_short(data.get("title", node_id)),
-                size=12 + min(degree, 20),
-                color=SOURCE_COLOURS.get(source, "#5F6368"),
-                title=data.get("title", node_id),
-            )
+        degree = graph.degree(nid)
+        title  = node_data[nid]["title"]
+        x, y   = pos[nid]
+        net.add_node(
+            nid,
+            label=_short(title, 28),
+            title=title,                     # vis.js hover tooltip
+            size=10 + min(degree * 2, 22),
+            color=SOURCE_COLOURS.get(source, "#5F6368"),
+            x=float(x * scale),
+            y=float(y * scale),
         )
-    edges = []
+
     for a, b, data in graph.edges(data=True):
         etype = data.get("edge_type", "shared_concept")
-        edges.append(
-            Edge(
-                source=a,
-                target=b,
-                color=EDGE_COLOURS.get(etype, "#8993A4"),
-                title=data.get("evidence", etype),
-            )
+        net.add_edge(
+            a, b,
+            color=EDGE_COLOURS.get(etype, "#8993A4"),
+            title=data.get("evidence", etype),
+            width=1,
         )
-    config = Config(
-        height=height,
-        width="100%",
-        directed=False,
-        physics=True,
-        nodeHighlightBehavior=True,
-        collapsible=False,
+
+    # Inject floating info card + physics toggle into the pyvis HTML.
+    payload = json.dumps(node_data).replace("</script>", r"<\/script>")
+
+    injection = f"""
+<div id="_xz_panel" style="
+    display:none; position:fixed; top:14px; right:14px; width:300px;
+    max-height:420px; overflow-y:auto;
+    background:#1e1e2e; color:#cdd6f4;
+    border:1px solid #45475a; border-radius:10px;
+    padding:14px 16px; font-family:system-ui,sans-serif;
+    font-size:12px; line-height:1.55; z-index:9999;
+    box-shadow:0 8px 32px rgba(0,0,0,.7);">
+</div>
+
+<button id="_xz_phys" onclick="_xzToggle()" style="
+    position:fixed; bottom:14px; left:14px;
+    background:#313244; color:#cdd6f4; border:none;
+    padding:5px 12px; border-radius:6px;
+    font-size:12px; cursor:pointer; z-index:9999;">
+  ▶ Animate
+</button>
+
+<script>
+var _xzData = {payload};
+var _xzOn   = false;
+
+function _xzToggle() {{
+    _xzOn = !_xzOn;
+    network.setOptions({{physics:{{enabled:_xzOn}}}});
+    document.getElementById('_xz_phys').textContent = _xzOn ? '⏸ Freeze' : '▶ Animate';
+}}
+
+(function _xzWait() {{
+    if (typeof network === 'undefined') {{ setTimeout(_xzWait, 60); return; }}
+
+    network.on('click', function(p) {{
+        var panel = document.getElementById('_xz_panel');
+        if (!p.nodes.length) {{ panel.style.display='none'; return; }}
+
+        var d = _xzData[p.nodes[0]];
+        if (!d) return;
+
+        var h = '<div style="display:flex;justify-content:space-between;align-items:flex-start">';
+        h += '<b style="color:#cba6f7;font-size:13px;flex:1;padding-right:6px">' + d.title + '</b>';
+        h += '<span onclick="document.getElementById(\'_xz_panel\').style.display=\'none\'" ';
+        h += 'style="cursor:pointer;color:#6c7086;font-size:16px;flex-shrink:0">✕</span></div>';
+
+        if (d.authors) h += '<div style="color:#a6e3a1;margin-top:6px">' + d.authors + '</div>';
+
+        var meta = [];
+        if (d.year) meta.push(d.year);
+        if (d.source) meta.push(d.source);
+        if (d.citations) meta.push(d.citations + ' cit.');
+        if (meta.length) h += '<div style="color:#6c7086;margin-top:4px">' + meta.join(' · ') + '</div>';
+
+        if (d.areas && d.areas.length) {{
+            h += '<div style="margin-top:7px">';
+            d.areas.forEach(function(a){{
+                h += '<span style="background:#313244;padding:2px 7px;border-radius:4px;'
+                  +  'margin-right:4px;display:inline-block;margin-bottom:3px">' + a + '</span>';
+            }});
+            h += '</div>';
+        }}
+
+        if (d.abstract)
+            h += '<div style="border-top:1px solid #313244;margin-top:9px;padding-top:8px">'
+              +  d.abstract + '…</div>';
+
+        if (d.url)
+            h += '<div style="margin-top:9px">'
+              +  '<a href="' + d.url + '" target="_blank" '
+              +  'style="color:#89b4fa;text-decoration:none">Open source ↗</a></div>';
+
+        panel.innerHTML = h;
+        panel.style.display = 'block';
+    }});
+}})();
+</script>
+"""
+
+    html = net.generate_html()
+    html = html.replace("</body>", injection + "\n</body>")
+    st.components.v1.html(html, height=height, scrolling=False)
+
+    # Selectbox to open full Streamlit detail panel below the graph.
+    options: dict[str, str | None] = {"— or pick from list to open full detail —": None}
+    for nid in sorted(node_data, key=lambda n: node_data[n]["title"].lower()):
+        options[_short(node_data[nid]["title"], 72)] = nid
+
+    choice = st.selectbox(
+        "Open paper detail",
+        list(options.keys()),
+        key="graph_node_picker",
+        label_visibility="collapsed",
     )
-    return agraph(nodes=nodes, edges=edges, config=config)
+    return options[choice]
 
 
 def edge_legend() -> None:
@@ -182,6 +290,69 @@ def edge_legend() -> None:
 def _short(text: str, length: int = 40) -> str:
     text = text or ""
     return text if len(text) <= length else text[: length - 1] + "…"
+
+
+def paper_detail_panel(store: Store, paper: Paper) -> None:
+    """Full markdown-style paper detail, shown when clicking a graph node."""
+    collection: list = st.session_state.setdefault("collection", [])
+    in_collection = paper.id in collection
+
+    col_title, col_btn = st.columns([7, 1])
+    with col_title:
+        st.markdown(f"## {paper.title}")
+    with col_btn:
+        label = "★ Saved" if in_collection else "☆ Save"
+        btn_type = "secondary" if in_collection else "primary"
+        if st.button(label, type=btn_type, key=f"save_{paper.id}"):
+            if in_collection:
+                collection.remove(paper.id)
+            else:
+                collection.append(paper.id)
+            st.rerun()
+
+    meta = []
+    if paper.year:
+        meta.append(f"**{paper.year}**")
+    meta.append(paper.source.value)
+    if paper.citation_count is not None:
+        meta.append(f"{paper.citation_count} citations")
+    st.caption(" · ".join(meta))
+
+    if paper.authors:
+        names = ", ".join(a.name for a in paper.authors[:8])
+        if len(paper.authors) > 8:
+            names += f" (+{len(paper.authors) - 8} more)"
+        st.write(f"*{names}*")
+
+    if paper.research_areas:
+        st.write(" ".join(f"`{a.name}`" for a in paper.research_areas))
+
+    if paper.url:
+        st.markdown(f"[Open source page →]({paper.url})")
+
+    st.divider()
+
+    tab_abstract, tab_concepts, tab_sum, tab_fig = st.tabs(
+        ["Abstract", "Concepts", "Summaries", "Figures"]
+    )
+    with tab_abstract:
+        if paper.abstract:
+            st.write(paper.abstract)
+        else:
+            st.info("No abstract available.")
+    with tab_concepts:
+        concepts = store.get_concepts_for_paper(paper.id)
+        if concepts:
+            st.write(" ".join(f"`{c.name}`" for c, _ in concepts))
+        else:
+            empty_state(
+                "No concepts yet.",
+                hint="python scripts/run_embed_papers.py --cluster kmeans",
+            )
+    with tab_sum:
+        summaries_block(store, paper)
+    with tab_fig:
+        figure_grid(store, paper)
 
 
 def empty_state(message: str, *, hint: str | None = None) -> None:
