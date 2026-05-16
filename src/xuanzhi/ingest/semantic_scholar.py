@@ -176,7 +176,7 @@ class SemanticScholarSource(IngestSource):
 
         external = r.get("externalIds") or {}
         doi = external.get("DOI")
-        pdf_url = (r.get("openAccessPdf") or {}).get("url")
+        pdf_url = (r.get("openAccessPdf") or {}).get("url") or None
         url = f"https://www.semanticscholar.org/paper/{paper_id}"
 
         return Paper(
