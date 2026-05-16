@@ -127,7 +127,12 @@ class SemanticScholarSource(IngestSource):
             try:
                 resp = await client.get(url, params=params)
                 if resp.status_code == 429:
-                    log.warning("[s2] 429 backoff %.1fs", backoff)
+                    log.warning("[s2] 429 rate-limited — backoff %.1fs (attempt %d/%d)", backoff, attempt, max_attempts)
+                    last = RuntimeError(
+                        "Semantic Scholar is rate-limiting this IP. "
+                        "Register for a free API key at https://www.semanticscholar.org/product/api "
+                        "and set SEMANTIC_SCHOLAR_API_KEY in your .env file."
+                    )
                     await asyncio.sleep(backoff)
                     backoff *= 2
                     continue
@@ -138,7 +143,7 @@ class SemanticScholarSource(IngestSource):
                 log.warning("[s2] attempt %d failed: %s", attempt, e)
                 await asyncio.sleep(backoff)
                 backoff *= 2
-        raise RuntimeError(f"Semantic Scholar request failed after retries: {last}")
+        raise RuntimeError(str(last))
 
     def _row_to_paper(self, r: dict) -> Paper | None:
         paper_id = r.get("paperId")
@@ -171,7 +176,7 @@ class SemanticScholarSource(IngestSource):
 
         external = r.get("externalIds") or {}
         doi = external.get("DOI")
-        pdf_url = (r.get("openAccessPdf") or {}).get("url")
+        pdf_url = (r.get("openAccessPdf") or {}).get("url") or None
         url = f"https://www.semanticscholar.org/paper/{paper_id}"
 
         return Paper(
