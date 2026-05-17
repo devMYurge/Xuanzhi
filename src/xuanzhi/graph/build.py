@@ -291,7 +291,7 @@ class CrossLiteratureResult:
     papers_a: list[str] = field(default_factory=list)  # paper ids
     papers_b: list[str] = field(default_factory=list)
     shared_concepts: list[tuple[str, int]] = field(default_factory=list)  # (name, freq)
-    bridging_papers: list[str] = field(default_factory=list)  # ids touching both worlds
+    bridging_papers: list[tuple[str, float]] = field(default_factory=list)  # (id, bridge_score)
 
     @property
     def is_empty(self) -> bool:
@@ -352,13 +352,20 @@ def cross_literature(
         reverse=True,
     )
 
-    # Bridging papers: carry a shared concept.
-    bridging: set[str] = set()
+    # Bridging papers: carry at least one shared concept, ranked by what fraction
+    # of their concepts are cross-area (papers in both areas score 1.0 by definition).
+    both = ids_a & ids_b
+    bridging_scored: list[tuple[str, float]] = []
     for pid in ids_a | ids_b:
-        if paper_concepts.get(pid, set()) & shared_ids:
-            bridging.add(pid)
-    # Papers sitting in *both* areas are bridges by definition.
-    bridging |= ids_a & ids_b
-    result.bridging_papers = sorted(bridging)
+        own = paper_concepts.get(pid, set())
+        overlap = own & shared_ids
+        if not overlap and pid not in both:
+            continue
+        if pid in both:
+            score = 1.0
+        else:
+            score = len(overlap) / len(own) if own else 0.0
+        bridging_scored.append((pid, round(score, 3)))
+    result.bridging_papers = sorted(bridging_scored, key=lambda t: t[1], reverse=True)
 
     return result

@@ -382,12 +382,17 @@ def view_cross() -> None:
         )
 
     st.subheader("Bridging papers")
+    st.caption("Ranked by what fraction of each paper's concepts are shared across the two areas.")
     if result.bridging_papers:
-        for pid in result.bridging_papers[:25]:
+        for pid, score in result.bridging_papers[:25]:
             bp = store.get_paper(pid)
             if bp:
                 with st.container(border=True):
-                    ui.paper_card(bp)
+                    sc1, sc2 = st.columns([5, 1])
+                    with sc1:
+                        ui.paper_card(bp)
+                    with sc2:
+                        st.metric("Bridge score", f"{score:.0%}")
     else:
         st.info("No bridging papers with the current concept data.")
 
