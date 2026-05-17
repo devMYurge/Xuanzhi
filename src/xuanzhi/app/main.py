@@ -20,6 +20,7 @@ import asyncio
 import streamlit as st
 
 from xuanzhi.app import components as ui
+from xuanzhi.app import pipeline
 from xuanzhi.app.data import (
     DEFAULT_DB_PATH,
     db_overview,
@@ -56,6 +57,7 @@ VIEWS = [
     "Collection",
     "Overview",
     "Ingest",
+    "Pipeline",
     "Paper Explorer",
     "Cross-Literature",
     "Figure Source Lookup",
@@ -760,6 +762,268 @@ def view_collection() -> None:
                     st.rerun()
 
 
+# =============================================================== Pipeline
+
+
+def _run_step(label: str, fn) -> None:
+    """Run a pipeline callable with a spinner; stash the result for display.
+
+    The result is kept in session state (not printed inline) so it survives
+    the ``st.rerun()`` the caller triggers to refresh cached views.
+    """
+    with st.spinner(f"{label}…"):
+        try:
+            message = fn()
+        except Exception as e:  # noqa: BLE001
+            st.session_state["pipeline_result"] = ("error", f"{label} failed: {e}")
+            return
+    st.session_state["pipeline_result"] = ("ok", message)
+    _bump_token()
+
+
+def view_pipeline() -> None:
+    st.title("Pipeline")
+    st.caption(
+        "Run each stage of the Xuanzhi pipeline from the browser — the same "
+        "work the `scripts/` CLIs do. Steps depend on the ones above them, "
+        "so run them top to bottom. Heavy steps load ML models and block the "
+        "page while they run; keep the limits small for a quick demo."
+    )
+    st.caption(
+        f"Writing to **{db_path}** — change the database in the sidebar. "
+        "For image-to-source lookup use the **Figure Source Lookup** view."
+    )
+
+    # Surface the result of the step that triggered the last rerun.
+    result = st.session_state.pop("pipeline_result", None)
+    if result:
+        kind, msg = result
+        (st.success if kind == "ok" else st.error)(msg)
+
+    has_papers = overview["papers"] > 0
+
+    # ---- 1. ArXiv ingest (run_arxiv_ingest.py) --------------------------
+    with st.container(border=True):
+        st.subheader("1 · Ingest papers from ArXiv")
+        st.caption(
+            "Scrapes ArXiv search results with a headless browser "
+            "(`run_arxiv_ingest.py`). Needs Playwright's Chromium installed. "
+            "The **Ingest** view offers the lighter Semantic Scholar API path."
+        )
+        query = st.text_input(
+            "ArXiv search query",  # CLI: positional `query`
+            placeholder="e.g. graph retrieval augmented generation",
+            key="pl_query",
+        )
+        max_papers = st.slider(  # CLI: --max
+            "Max papers", 5, 100, 10, step=5, key="pl_max"
+        )
+        with st.expander("Advanced options"):
+            show_browser = st.checkbox(  # CLI: --show-browser
+                "Show the browser window (run non-headless)",
+                key="pl_show_browser",
+                help="Only has an effect when the app runs on a desktop, "
+                "not a headless server.",
+            )
+        if st.button(
+            "Run ArXiv ingest", type="primary", disabled=not query, key="pl_ingest"
+        ):
+            _run_step(
+                "ArXiv ingest",
+                lambda: pipeline.ingest_arxiv(
+                    store, query, max_papers, headless=not show_browser
+                ),
+            )
+            st.rerun()
+
+    # ---- 2. embed + cluster (run_embed_papers.py) -----------------------
+    with st.container(border=True):
+        st.subheader("2 · Embed + cluster into concepts")
+        st.caption(
+            "Encodes every paper with sentence-transformers and clusters the "
+            "vectors into named concepts (`run_embed_papers.py`)."
+        )
+        do_cluster = st.checkbox(  # CLI: --cluster
+            "Cluster into concepts after embedding", value=True, key="pl_do_cluster"
+        )
+        with st.expander("Advanced options"):
+            embed_model = st.text_input(  # CLI: --model
+                "sentence-transformers model id",
+                value=pipeline.DEFAULT_EMBED_MODEL,
+                key="pl_embed_model",
+            )
+            reembed_all = st.checkbox(  # CLI: --all
+                "Re-embed every paper (not just the ones missing an embedding)",
+                key="pl_reembed_all",
+            )
+            cluster_method = st.selectbox(  # CLI: --cluster {kmeans,hdbscan}
+                "Clustering method", ["kmeans", "hdbscan"], key="pl_cluster_method"
+            )
+            cluster_k = st.number_input(  # CLI: --k
+                "KMeans cluster count (0 = auto)",
+                min_value=0, value=0, step=1, key="pl_cluster_k",
+            )
+            min_cluster_size = st.number_input(  # CLI: --min-cluster-size
+                "HDBSCAN min cluster size",
+                min_value=2, value=5, step=1, key="pl_min_cluster_size",
+            )
+        if st.button(
+            "Run embed + cluster",
+            type="primary",
+            disabled=not has_papers,
+            key="pl_embed",
+        ):
+            _run_step(
+                "Embed + cluster",
+                lambda: pipeline.embed_and_cluster(
+                    store,
+                    model=embed_model,
+                    only_missing=not reembed_all,
+                    cluster=do_cluster,
+                    method=cluster_method,
+                    k=int(cluster_k) or None,
+                    min_cluster_size=int(min_cluster_size),
+                ),
+            )
+            st.rerun()
+        if not has_papers:
+            st.info("Ingest some papers first.")
+
+    # ---- 3. summarise (run_summarise.py) --------------------------------
+    with st.container(border=True):
+        st.subheader("3 · Summarise papers")
+        st.caption(
+            "Writes a short summary per paper with a HuggingFace model "
+            "(`run_summarise.py`)."
+        )
+        sum_limit = st.slider(  # CLI: --limit
+            "Papers to summarise (0 = all)", 0, 100, 25, step=5, key="pl_sum_limit"
+        )
+        sum_words = st.slider(  # CLI: --max-words
+            "Max words", 40, 200, 80, step=10, key="pl_sum_words"
+        )
+        sum_openai = st.checkbox(  # CLI: --openai
+            "Also summarise with OpenAI (needs OPENAI_API_KEY)", key="pl_sum_openai"
+        )
+        with st.expander("Advanced options"):
+            sum_hf_model = st.text_input(  # CLI: --hf-model
+                "HuggingFace summarisation model id",
+                value=pipeline.DEFAULT_HF_SUMMARISER,
+                key="pl_sum_hf_model",
+            )
+            sum_openai_model = st.text_input(  # CLI: --openai-model
+                "OpenAI model id",
+                value=pipeline.DEFAULT_OPENAI_MODEL,
+                key="pl_sum_openai_model",
+            )
+        if st.button(
+            "Run summarise", type="primary", disabled=not has_papers, key="pl_sum"
+        ):
+            _run_step(
+                "Summarise",
+                lambda: pipeline.summarise(
+                    store,
+                    limit=sum_limit or None,
+                    hf_model=sum_hf_model,
+                    max_words=sum_words,
+                    use_openai=sum_openai,
+                    openai_model=sum_openai_model,
+                ),
+            )
+            st.rerun()
+        if not has_papers:
+            st.info("Ingest some papers first.")
+
+    # ---- 4. compare summarisers (run_compare_summarisers.py) ------------
+    with st.container(border=True):
+        st.subheader("4 · Compare summarisers")
+        st.caption(
+            "Benchmarks the summariser backends (latency, compression, "
+            "ROUGE-L) and writes a CSV/JSON report to `data/outputs/` "
+            "(`run_compare_summarisers.py`)."
+        )
+        cmp_limit = st.slider(  # CLI: --limit (CLI default 25)
+            "Papers to compare over", 5, 100, 25, step=5, key="pl_cmp_limit"
+        )
+        cmp_openai = st.checkbox(  # CLI: --openai
+            "Include OpenAI (needs OPENAI_API_KEY)", key="pl_cmp_openai"
+        )
+        with st.expander("Advanced options"):
+            cmp_hf_models_raw = st.text_area(  # CLI: --hf-models (nargs="+")
+                "HuggingFace model ids (one per line)",
+                value=pipeline.DEFAULT_HF_SUMMARISER,
+                key="pl_cmp_hf_models",
+            )
+            cmp_words = st.slider(  # CLI: --max-words
+                "Max words", 40, 200, 80, step=10, key="pl_cmp_words"
+            )
+            cmp_openai_model = st.text_input(  # CLI: --openai-model
+                "OpenAI model id",
+                value=pipeline.DEFAULT_OPENAI_MODEL,
+                key="pl_cmp_openai_model",
+            )
+        if st.button(
+            "Run comparison", type="primary", disabled=not has_papers, key="pl_cmp"
+        ):
+            cmp_hf_models = [
+                m.strip() for m in cmp_hf_models_raw.splitlines() if m.strip()
+            ]
+            _run_step(
+                "Summariser comparison",
+                lambda: pipeline.compare(
+                    store,
+                    hf_models=cmp_hf_models,
+                    limit=cmp_limit,
+                    max_words=cmp_words,
+                    use_openai=cmp_openai,
+                    openai_model=cmp_openai_model,
+                ),
+            )
+            st.rerun()
+        if not has_papers:
+            st.info("Ingest some papers first.")
+
+    # ---- 5. extract figures (run_extract_figures.py) --------------------
+    with st.container(border=True):
+        st.subheader("5 · Extract + index figures")
+        st.caption(
+            "Downloads PDFs, extracts figures, classifies them with CLIP and "
+            "builds the figure search index (`run_extract_figures.py`)."
+        )
+        fig_limit = st.slider(  # CLI: --limit
+            "Papers to process (0 = all)", 0, 100, 15, step=5, key="pl_fig_limit"
+        )
+        fig_classify = st.checkbox(  # CLI: --no-classify (inverted)
+            "Classify figure types with CLIP", value=True, key="pl_fig_classify"
+        )
+        fig_index = st.checkbox(  # CLI: --no-index (inverted)
+            "Build the CLIP figure search index", value=True, key="pl_fig_index"
+        )
+        with st.expander("Advanced options"):
+            fig_overwrite = st.checkbox(  # CLI: --overwrite-pdf
+                "Re-download PDFs even if already cached", key="pl_fig_overwrite"
+            )
+        if st.button(
+            "Run figure extraction",
+            type="primary",
+            disabled=not has_papers,
+            key="pl_fig",
+        ):
+            _run_step(
+                "Figure extraction",
+                lambda: pipeline.extract_figures(
+                    store,
+                    limit=fig_limit or None,
+                    classify=fig_classify,
+                    build_index=fig_index,
+                    overwrite_pdf=fig_overwrite,
+                ),
+            )
+            st.rerun()
+        if not has_papers:
+            st.info("Ingest some papers first.")
+
+
 # ================================================================= router
 
 _ROUTER = {
@@ -767,6 +1031,7 @@ _ROUTER = {
     "Collection": view_collection,
     "Overview": view_overview,
     "Ingest": view_ingest,
+    "Pipeline": view_pipeline,
     "Paper Explorer": view_explorer,
     "Cross-Literature": view_cross,
     "Figure Source Lookup": view_figure_lookup,

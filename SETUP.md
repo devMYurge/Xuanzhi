@@ -135,19 +135,23 @@ python scripts/run_demo.py --preset full --openai
 streamlit run streamlit_app.py
 ```
 
-A browser tab opens at `http://localhost:8501`. Six views in the sidebar:
+A browser tab opens at `http://localhost:8501`. Eight views in the sidebar:
 
 - **Knowledge Graph** — the headline view. Interactive pyvis network;
   click a node for the in-graph info card.
 - **Collection** — papers you've saved via the ☆ button.
 - **Overview** — DB dashboard + pipeline status checklist.
 - **Ingest** — Semantic Scholar quick-add (Playwright runs from the CLI).
+- **Pipeline** — run every `scripts/` stage (ingest, embed + cluster,
+  summarise, compare, extract figures) from the browser with a button
+  per step; each step's CLI options are under "Advanced options".
 - **Paper Explorer** — search, summaries, figures, related papers.
 - **Cross-Literature** — two areas in, shared concepts + bridging papers.
 - **Figure Source Lookup** — upload an image, get a formatted citation.
 
 If a view says "no data yet" with a `python scripts/...` hint, run that
-command in a terminal and reload the page.
+command in a terminal — or run the same step from the **Pipeline** view —
+and reload the page.
 
 ---
 
