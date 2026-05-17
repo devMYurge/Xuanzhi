@@ -80,7 +80,7 @@ def summaries_block(store: Store, paper: Paper) -> None:
     if not summaries:
         st.info(
             "No summaries yet. Run `python scripts/run_summarise.py` "
-            "(add `--claude` to compare against a frontier model)."
+            "(add `--openai` to compare against a frontier model)."
         )
         return
     cols = st.columns(len(summaries))

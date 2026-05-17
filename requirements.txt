@@ -49,6 +49,10 @@ openai>=1.40,<2.0
 # torchvision MUST match torch (0.17 <-> torch 2.2). Keep this bound in
 # sync with the torch pin above whenever the torch version changes.
 torchvision>=0.17,<0.18
+# open_clip_torch loads OpenAI's CLIP weights directly from OpenAI's CDN.
+# We switched to this from sentence-transformers' CLIP wrapper because HF
+# Xet Storage has been flaky for the ViT-B-32 weights. See xuanzhi/cv/_clip.py.
+open_clip_torch>=2.24,<3.0
 pillow>=10.0
 pdfplumber>=0.11   # figure / text extraction
 PyMuPDF>=1.24      # figure bbox + image rendering

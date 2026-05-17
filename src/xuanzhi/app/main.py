@@ -585,7 +585,7 @@ def _ingest_uploaded_paper(
     classifier = FigureClassifier()
     for fig in figs:
         fig = classifier.classify_figure(fig)
-        store.put_figure(fig)
+        store.add_figure(fig)
 
     # --- embed only the new figures (skips already-embedded ones) ---
     FigureIndex().build_from_store(store, only_missing=True)
