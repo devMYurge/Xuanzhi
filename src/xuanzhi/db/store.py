@@ -269,15 +269,34 @@ class Store:
             )
 
     def iter_figure_embeddings(
-        self, model: str
+        self,
+        model: str,
+        exclude_types: set[str] | None = None,
     ) -> Iterator[tuple[str, int, bytes]]:
-        """Yield ``(figure_id, dim, vector_bytes)`` for every figure embedding."""
+        """Yield ``(figure_id, dim, vector_bytes)`` for every figure embedding.
+
+        Pass ``exclude_types={'photo'}`` to skip figures classified as
+        photographs (headshots, logos, etc.) that pollute similarity search.
+        """
         with self._conn() as c:
-            for row in c.execute(
-                "SELECT figure_id, dim, vector FROM figure_embeddings WHERE model = ?",
-                (model,),
-            ):
-                yield row["figure_id"], row["dim"], row["vector"]
+            if exclude_types:
+                placeholders = ",".join("?" * len(exclude_types))
+                sql = f"""
+                    SELECT fe.figure_id, fe.dim, fe.vector
+                    FROM figure_embeddings fe
+                    JOIN figures f ON f.id = fe.figure_id
+                    WHERE fe.model = ?
+                      AND f.figure_type NOT IN ({placeholders})
+                """
+                params = [model, *exclude_types]
+                for row in c.execute(sql, params):
+                    yield row["figure_id"], row["dim"], row["vector"]
+            else:
+                for row in c.execute(
+                    "SELECT figure_id, dim, vector FROM figure_embeddings WHERE model = ?",
+                    (model,),
+                ):
+                    yield row["figure_id"], row["dim"], row["vector"]
 
     def figure_ids_missing_embedding(self, model: str) -> list[str]:
         with self._conn() as c:

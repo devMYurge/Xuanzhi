@@ -384,72 +384,337 @@ def view_cross() -> None:
 
 # =================================================== Figure Source Lookup
 
+# ---- Citation formatters ------------------------------------------------
+
+def _last_first(name: str) -> str:
+    """'John Smith' → 'Smith, J.'  (best-effort; works for most Western names)."""
+    parts = name.strip().split()
+    if len(parts) == 1:
+        return parts[0]
+    initials = ". ".join(p[0].upper() for p in parts[:-1]) + "."
+    return f"{parts[-1]}, {initials}"
+
+
+def _format_citation(paper, style: str) -> str:
+    """Return a formatted citation string for *paper* in the requested style."""
+    if paper is None:
+        return "(source paper not found in database)"
+
+    authors = paper.authors or []
+    title = paper.title or "Untitled"
+    year = str(paper.year) if paper.year else "n.d."
+    doi = paper.doi or ""
+    url = paper.url or ""
+
+    # Prefer arXiv URL when we have the ID
+    arxiv_id = (paper.raw_metadata or {}).get("externalIds", {}).get("ArXiv", "")
+    if arxiv_id:
+        url = f"https://arxiv.org/abs/{arxiv_id}"
+
+    doi_str = f"https://doi.org/{doi}" if doi else url
+    venue = paper.venue or (f"arXiv preprint arXiv:{arxiv_id}" if arxiv_id else "")
+
+    names = [a.name for a in authors]
+
+    if style == "APA":
+        # Last, F., Last, F., & Last, F. (year). Title. Venue. doi
+        if not names:
+            author_str = "Unknown Author"
+        elif len(names) == 1:
+            author_str = _last_first(names[0])
+        elif len(names) == 2:
+            author_str = f"{_last_first(names[0])}, & {_last_first(names[1])}"
+        elif len(names) <= 7:
+            parts = [_last_first(n) for n in names[:-1]]
+            author_str = ", ".join(parts) + f", & {_last_first(names[-1])}"
+        else:
+            parts = [_last_first(n) for n in names[:6]]
+            author_str = ", ".join(parts) + f", ... {_last_first(names[-1])}"
+        venue_part = f" {venue}." if venue else ""
+        doi_part = f" {doi_str}" if doi_str else ""
+        return f"{author_str} ({year}). {title}.{venue_part}{doi_part}"
+
+    elif style == "MLA":
+        # Last, First, et al. "Title." Venue, year. URL.
+        if not names:
+            author_str = "Unknown Author"
+        elif len(names) == 1:
+            parts = names[0].strip().split()
+            author_str = f"{parts[-1]}, {' '.join(parts[:-1])}" if len(parts) > 1 else names[0]
+        elif len(names) == 2:
+            p0 = names[0].strip().split()
+            first = f"{p0[-1]}, {' '.join(p0[:-1])}" if len(p0) > 1 else names[0]
+            author_str = f"{first}, and {names[1]}"
+        else:
+            p0 = names[0].strip().split()
+            first = f"{p0[-1]}, {' '.join(p0[:-1])}" if len(p0) > 1 else names[0]
+            author_str = f"{first}, et al."
+        venue_part = f" {venue}," if venue else ""
+        url_part = f" {url}." if url else "."
+        return f'{author_str} "{title}."{venue_part} {year}.{url_part}'
+
+    elif style == "Harvard":
+        # Last, F., Last, F. and Last, F. (year) 'Title', Venue. doi
+        if not names:
+            author_str = "Unknown Author"
+        elif len(names) == 1:
+            author_str = _last_first(names[0])
+        elif len(names) == 2:
+            author_str = f"{_last_first(names[0])} and {_last_first(names[1])}"
+        elif len(names) <= 3:
+            parts = [_last_first(n) for n in names[:-1]]
+            author_str = ", ".join(parts) + f" and {_last_first(names[-1])}"
+        else:
+            author_str = f"{_last_first(names[0])} et al."
+        venue_part = f", {venue}" if venue else ""
+        doi_part = f". Available at: {doi_str}" if doi_str else ""
+        return f"{author_str} ({year}) '{title}'{venue_part}{doi_part}"
+
+    elif style == "Chicago":
+        # Last, First, First Last, and First Last. "Title." Venue (year). doi.
+        if not names:
+            author_str = "Unknown Author"
+        elif len(names) == 1:
+            parts = names[0].strip().split()
+            author_str = f"{parts[-1]}, {' '.join(parts[:-1])}" if len(parts) > 1 else names[0]
+        elif len(names) == 2:
+            p0 = names[0].strip().split()
+            first = f"{p0[-1]}, {' '.join(p0[:-1])}" if len(p0) > 1 else names[0]
+            author_str = f"{first}, and {names[1]}"
+        elif len(names) <= 3:
+            p0 = names[0].strip().split()
+            first = f"{p0[-1]}, {' '.join(p0[:-1])}" if len(p0) > 1 else names[0]
+            middle = ", ".join(names[1:-1])
+            author_str = f"{first}, {middle}, and {names[-1]}"
+        else:
+            p0 = names[0].strip().split()
+            first = f"{p0[-1]}, {' '.join(p0[:-1])}" if len(p0) > 1 else names[0]
+            author_str = f"{first} et al."
+        venue_part = f" {venue}" if venue else ""
+        doi_part = f" {doi_str}." if doi_str else ""
+        return f'{author_str}. "{title}."{venue_part} ({year}).{doi_part}'
+
+    # Fallback — plain
+    plain_authors = ", ".join(names[:3]) + (" et al." if len(names) > 3 else "")
+    return f"{plain_authors} ({year}). {title}."
+
+
+def _normalise_s2_id(raw: str) -> str:
+    """Normalise a user-typed arXiv ID or DOI to Semantic Scholar format."""
+    import re
+    s = raw.strip()
+    if re.match(r"^10\.", s):
+        return f"DOI:{s}"
+    if s.upper().startswith("DOI:"):
+        return s
+    clean = re.sub(r"^(arxiv:?\s*)", "", s, flags=re.IGNORECASE)
+    return f"ARXIV:{clean}"
+
+
+def _ingest_uploaded_paper(
+    store,
+    pdf_bytes: bytes,
+    paper_id_raw: str,
+    manual_title: str,
+    manual_authors: str,
+    manual_year: int | None,
+) -> tuple[int, str]:
+    """Save a user-uploaded PDF, extract + classify + embed its figures.
+
+    Returns (n_figures_added, paper_title).
+    """
+    import asyncio
+    from pathlib import Path as _P
+
+    from xuanzhi.cv.classify import FigureClassifier
+    from xuanzhi.cv.figures import extract_figures
+    from xuanzhi.cv.index import FigureIndex
+    from xuanzhi.schema import Author, Paper, Source
+
+    repo_root = DEFAULT_DB_PATH.parent.parent
+    pdfs_dir = repo_root / "data" / "pdfs"
+    figures_dir = repo_root / "data" / "figures"
+    pdfs_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- fetch or build paper record ---
+    if paper_id_raw.strip():
+        s2_id = _normalise_s2_id(paper_id_raw)
+        from xuanzhi.ingest import SemanticScholarSource
+
+        async def _fetch():
+            return await SemanticScholarSource().enrich(s2_id)
+
+        paper = asyncio.run(_fetch())
+        if paper is None:
+            raise ValueError(f"No paper found for '{s2_id}'. Double-check the ID.")
+    else:
+        if not manual_title.strip():
+            raise ValueError("Provide an ArXiv/DOI ID, or fill in the Title field.")
+        authors = [
+            Author.from_name(n.strip())
+            for n in manual_authors.split(",")
+            if n.strip()
+        ]
+        paper = Paper(
+            id=Paper.build_id(Source.MANUAL, manual_title.strip()),
+            source=Source.MANUAL,
+            source_id=manual_title.strip(),
+            title=manual_title.strip(),
+            authors=authors,
+            year=int(manual_year) if manual_year else None,
+        )
+
+    store.upsert_paper(paper)
+
+    # --- save PDF ---
+    pdf_path = pdfs_dir / f"{paper.id}.pdf"
+    pdf_path.write_bytes(pdf_bytes)
+
+    # --- extract, classify, persist figures ---
+    figs = extract_figures(pdf_path, paper.id, figures_dir)
+    classifier = FigureClassifier()
+    for fig in figs:
+        fig = classifier.classify_figure(fig)
+        store.put_figure(fig)
+
+    # --- embed only the new figures (skips already-embedded ones) ---
+    FigureIndex().build_from_store(store, only_missing=True)
+
+    return len(figs), paper.title
+
 
 def view_figure_lookup() -> None:
     st.title("Figure Source Lookup")
     st.caption(
-        "Upload a figure you want to reuse — Xuanzhi finds the source paper "
-        "so you can cite it correctly."
+        "Upload a figure and Xuanzhi finds the source paper so you can cite it. "
+        "If the paper isn't in the index yet, attach its PDF too — it will be "
+        "ingested automatically before the search runs."
     )
 
-    if overview["figures"] == 0:
+    # ---- Inputs ----------------------------------------------------------
+    fig_col, pdf_col = st.columns(2)
+
+    with fig_col:
+        st.markdown("**Figure image** *(required)*")
+        uploaded_fig = st.file_uploader(
+            "Figure image", type=["png", "jpg", "jpeg", "webp", "bmp"],
+            label_visibility="collapsed", key="fig_image_upload",
+        )
+
+    with pdf_col:
+        st.markdown("**Source PDF** *(optional — attach if paper is not yet indexed)*")
+        uploaded_pdf = st.file_uploader(
+            "Source PDF", type=["pdf"],
+            label_visibility="collapsed", key="fig_pdf_upload",
+        )
+
+    # PDF metadata fields — only shown when a PDF is attached
+    paper_id_raw = ""
+    manual_title = manual_authors = ""
+    manual_year = 2025
+    if uploaded_pdf is not None:
+        paper_id_raw = st.text_input(
+            "ArXiv ID or DOI (recommended — fetches metadata automatically)",
+            placeholder="e.g. 2401.12345  or  DOI:10.1145/3626246",
+            key="fig_paper_id",
+        )
+        st.caption("Or enter metadata manually if you don't have an ID:")
+        mc1, mc2, mc3 = st.columns([3, 2, 1])
+        manual_title = mc1.text_input("Title", key="fig_manual_title")
+        manual_authors = mc2.text_input("Authors (comma-separated)", key="fig_manual_authors")
+        manual_year = mc3.number_input(
+            "Year", min_value=1900, max_value=2030, value=2025, step=1,
+            key="fig_manual_year",
+        )
+
+    top_k = st.slider("Results to show", 1, 10, 5)
+
+    search_clicked = st.button(
+        "Search", type="primary", disabled=uploaded_fig is None,
+    )
+
+    if not search_clicked:
+        if uploaded_fig is None:
+            st.info("Upload a figure image to get started.")
+        return
+
+    # ---- Run (ingest PDF if provided, then search) -----------------------
+    import tempfile
+    from pathlib import Path as _P
+
+    suffix = "." + uploaded_fig.name.rsplit(".", 1)[-1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_fig.getbuffer())
+        tmp_path = tmp.name
+
+    if uploaded_pdf is not None:
+        with st.spinner("Ingesting PDF — extracting and indexing figures…"):
+            try:
+                n_figs, title = _ingest_uploaded_paper(
+                    store,
+                    pdf_bytes=uploaded_pdf.getvalue(),
+                    paper_id_raw=paper_id_raw,
+                    manual_title=manual_title,
+                    manual_authors=manual_authors,
+                    manual_year=int(manual_year) if manual_year else None,
+                )
+                st.success(f"Added **{title}** — {n_figs} figures indexed.")
+                _bump_token()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Could not ingest PDF: {e}")
+                return
+
+    if overview["figures"] == 0 and uploaded_pdf is None:
         ui.empty_state(
-            "No figures indexed yet.",
+            "No figures in the index yet. Attach a source PDF above, or run:",
             hint="python scripts/run_extract_figures.py",
         )
         return
 
-    uploaded = st.file_uploader(
-        "Figure image", type=["png", "jpg", "jpeg", "webp", "bmp"]
-    )
-    top_k = st.slider("Results", 1, 10, 5)
-
-    if uploaded is None:
-        st.info("Upload an image to search.")
-        return
-
-    # Persist the upload to a temp file for the CLIP encoder.
-    import tempfile
-
-    suffix = "." + uploaded.name.rsplit(".", 1)[-1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded.getbuffer())
-        tmp_path = tmp.name
-
     left, right = st.columns([1, 2])
     with left:
-        st.image(tmp_path, caption="Your query image", use_container_width=True)
+        st.image(tmp_path, caption="Your figure", use_container_width=True)
 
     with right:
         try:
             from xuanzhi.app.data import get_figure_index
 
             index = get_figure_index(db_path, _token())
-            with st.spinner("Searching the figure index…"):
+            with st.spinner("Searching…"):
                 matches = index.search(store, tmp_path, top_k=top_k)
         except Exception as e:  # noqa: BLE001
-            st.error(f"Lookup failed: {e}")
+            st.error(f"Search failed: {e}")
             return
 
         if not matches:
-            st.warning("No similar figures found in the index.")
+            st.warning(
+                "No similar figures found. Try attaching the source PDF so "
+                "Xuanzhi can index it."
+            )
             return
+
+        cite_style = st.selectbox(
+            "Citation format",
+            ["APA", "MLA", "Harvard", "Chicago"],
+            index=0,
+        )
 
         for rank, m in enumerate(matches, 1):
             with st.container(border=True):
                 st.markdown(f"**#{rank} · similarity {m.similarity:.3f}**")
                 fc1, fc2 = st.columns([1, 2])
                 with fc1:
-                    from pathlib import Path as _P
-
                     if _P(m.figure.image_path).exists():
                         st.image(m.figure.image_path, use_container_width=True)
                 with fc2:
-                    st.write(m.citation_line())
                     if m.figure.caption:
                         st.caption(m.figure.caption[:200])
+                    citation = _format_citation(m.paper, cite_style)
+                    st.code(citation, language=None)
                     if m.paper and m.paper.url:
-                        st.markdown(f"[Source paper]({m.paper.url})")
+                        arxiv_id = (m.paper.raw_metadata or {}).get("externalIds", {}).get("ArXiv", "")
+                        link_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else m.paper.url
+                        st.markdown(f"[Source paper]({link_url})")
 
 
 # ================================================================= router
